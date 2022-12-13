@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEditor;
 using System.Reflection;
 using System;
+using Oku.Types;
 
 namespace Oku
 {

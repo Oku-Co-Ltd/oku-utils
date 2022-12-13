@@ -1,0 +1,16 @@
+{
+    "name": "Oku.Editor",
+    "rootNamespace": "",
+    "references": [
+        "Oku"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
