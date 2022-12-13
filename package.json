@@ -1,0 +1,8 @@
+{
+    "name": "com.oku.oku_utils",
+    "displayName": "Oku's Utils",
+    "version": "1.0.0",
+    "unity": "2020.3",
+    "description": "Collection of VTOL parts, managers, controllers, and other utils",
+    "dependencies": { }
+}
