@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using UnityEngine;
 using UnityEngine.Events;
 
@@ -28,6 +29,10 @@ namespace Oku
         /// <summary>An aircraft's root <see cref="PlayerVehicleNetSync"/>.</summary>
         /// <remarks>This is absolutely required, for local/remote to work properly.</remarks>
         public PlayerVehicleNetSync PvNetSync;
+
+        /// <summary>An aircraft's root <see cref="PlayerVehicleSetup"/>.</summary>
+        /// <remarks>This is required.</remarks>
+        public PlayerVehicleSetup PvSetup;
 
         /// <summary>The battery to link to this pilot seat.</summary>
         /// <remarks>This is required.</remarks>
@@ -65,6 +70,10 @@ namespace Oku
         /// <remarks>This is required.</remarks>
         public Actor Actor;
 
+        /// <summary>The visual target finder component, so the player can find targets.</summary>
+        /// <remarks>This is  required.</remarks>
+        public VisualTargetFinder VisualTargetFinder;
+
         /// <summary>Called when the pilot ejects.</summary>
         /// <remarks>Required. On the F/A-26B, is assigned to <see cref="FlightAssist.DisableAssist"/>,
         /// all <see cref="ModuleEngine.FailEngine"/>s, and <see cref="Battery.Disconnect"/>.</remarks>
@@ -82,6 +91,10 @@ namespace Oku
         /// <summary>An always-on HMCS display to link to this pilot seat.</summary>
         /// <remarks>This is optional. Do NOT set <see cref="HmcsDisplayObject"/> if this is used.</remarks>
         public GameObject AlwaysOnHmcsDisplayObject;
+
+        /// <summary>The interactable responsible for toggling the HMCS power status.</summary>
+        /// <remarks>This is optional.</remarks>
+        public VRLever HmcsPowerInteractable;
 
         /// <summary>Called when the joystick is rotated.</summary>
         /// <remarks>You probably want to assign this to <see cref="VehicleInputManager.SetJoystickPYR"/>.</remarks>
@@ -111,6 +124,19 @@ namespace Oku
         /// <summary>Called when the trigger button is pulled.</summary>
         /// <remarks>Optional. On the F/A-26B, is assigned to <see cref="WeaponManager.EndFire"/>.</remarks>
         public UnityEvent OnTriggerUp;
+
+        /// <summary>Used to swap between center and side joystick.</summary>
+        /// <remarks>Optional, but preferred.</remarks>
+        public ABObjectToggler JoystickToggler;
+
+        /// <summary>Used to raise the seat.</summary>
+        /// <remarks>Optional, but strongly preferred.</remarks>
+        [Header("Seat Adjust")]
+        public VRInteractable RaiseSeatInteractable;
+
+        /// <summary>Used to lower the seat.</summary>
+        /// <remarks>Optional, but strongly preferred.</remarks>
+        public VRInteractable LowerSeatInteractable;
 
         /// <summary>Called when the player dies due to excessive G-force.</summary>
         /// <remarks>Required. On the F/A-26B, is assigned to <see cref="VehicleMaster.KillPilot"/>.</remarks>
@@ -150,25 +176,53 @@ namespace Oku
         
         private readonly Dictionary<string, UnityAction> _actionMapVoid
             = new Dictionary<string, UnityAction>();
+        private readonly Dictionary<string, UnityAction<int>> _actionMapInt
+            = new Dictionary<string, UnityAction<int>>();
         private readonly Dictionary<string, UnityAction<Vector3>> _actionMapVec3
             = new Dictionary<string, UnityAction<Vector3>>();
 
         private readonly List<OkuPilotSpawn> _pilotSpawns = new List<OkuPilotSpawn>();
         private readonly Dictionary<int,GameObject> _instancedPilots = new Dictionary<int, GameObject>();
+        
+        // WARNING:
+        // I am not liable for loss of braincells in reading this code. Remember that this is
+        // designed to be the firmware driver interface for Baha systems incorporated, so you should
+        // never have to touch or see it as an Oku user.
+        //
+        //                 Garuda 1
+        // << Bahacode must be fought with Bahacode. >>
 
-        private void OnEnable()
+        private void Awake()
         {
-            OkuLog.Info("[OnEnable] Enabled, doing enable magic.");
-            _pilotSpawns.AddRange(GetComponentsInChildren<OkuPilotSpawn>().ToList());
+            AttachPilots();
+        }
+
+        public void AttachPilots()
+        {
+            const string lpf = "[AttachPilots]";
+            OkuLog.Info($"{lpf} Enabled, doing enable magic.");
+            var allPilotSpawns = GetComponentsInChildren<OkuPilotSpawn>().ToList();
+            allPilotSpawns.ForEach(ps =>
+            {
+                if (!_pilotSpawns.Contains(ps)) _pilotSpawns.Add(ps);
+            });
             if (_pilotSpawns.Count == 0)
             {
-                OkuLog.Error("[OnEnable] No OkuPilotSpawns found on the aircraft! Returning early, things will break.");
+                OkuLog.Error($"{lpf} No OkuPilotSpawns found on the aircraft! This isn't good. Returning early...");
                 enabled = false;
+                FlightSceneManager.instance.ReturnToBriefingOrExitScene();
                 return;
             }
 
             // ... we might need these... (man this is not very effective)
             var pilotPrefab = OkuConstDefs.GetPilotPrefab();
+            if (pilotPrefab == null)
+            {
+                OkuLog.Error($"{lpf} Pilot prefab returned null! This isn't good. Returning early...");
+                enabled = false;
+                FlightSceneManager.instance.ReturnToBriefingOrExitScene();
+                return;
+            }
 
             // phew... let's go! for every single pilot:
             foreach (var slot in _pilotSpawns)
@@ -178,20 +232,29 @@ namespace Oku
                 // the aircraft should exist with all its components underneath us somewhere...
                 if (!_instancedPilots.ContainsKey(slotIndex))
                 {
+
                     // first time enabling: let's build it
-                    OkuLog.Info($"[OnEnable] Instantiating pilot for slot {slotIndex}...");
-                    var instancedPilot = Instantiate(pilotPrefab, transform);
-                    instancedPilot.name = "OkuSpawnedPilot";
+                    OkuLog.Info($"{lpf} Instantiating pilot for slot {slotIndex}...");
+                    var instancedPilot = UnityUtils.InstantiateDisabled(pilotPrefab, transform);
+                    //var instancedPilot = Instantiate(pilotPrefab, transform);
+                    instancedPilot.name = $"OkuPilot_{slotIndex}";
                     _instancedPilots.Add(slotIndex, instancedPilot);
                 }
                 else
                 {
-                    OkuLog.Info($"[OnEnable] Retethering pilot for slot {slotIndex}...");
+                    OkuLog.Info($"{lpf} Retethering pilot for slot {slotIndex}...");
                 }
+
+                var dbgm = $"{lpf}[{slotIndex}]";
+                OkuLog.Info($"{dbgm} Instantiate successful, acquiring local/remote");
 
                 var instancedPilotLocal = InstancedPilotGetLocal(slotIndex);
                 var instancedPilotRemote = InstancedPilotGetRemote(slotIndex);
 
+                OkuLog.Info($"{dbgm} Local/remote grabbed!");
+
+
+                OkuLog.Info($"{dbgm} Hook: PvNetSync");
                 // step zero, configure local and remote objects on PlayerVehicleNetSync
                 if (PvNetSync != null)
                 {
@@ -232,21 +295,145 @@ namespace Oku
                 }
                 else
                 {
-                    OkuLog.Error("[OnEnable] No PlayerVehicleNetSync found on loaded vehicle!");
+                    OkuLog.Error($"{lpf} No PlayerVehicleNetSync found on loaded vehicle!");
                 }
 
+                OkuLog.Info($"{dbgm} Hook: PlayerModelSync");
                 var playerModelSync = GetComponentInChildren<PlayerModelSync>();
                 if (playerModelSync != null)
                 {
                     // we're attached to the root, so we should be the reference for this
                     playerModelSync.referenceTf = transform;
                 }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: missing PlayerModelSync in pilot (tell Oku about this)");
+                }
+
+                var ejectSync = GetComponentInChildren<EjectSync>();
+                if (ejectSync == null)
+                {
+                    OkuLog.Warn($"{lpf} Warning: missing EjectSync in pilot (tell Oku about this)");
+                }
+                
+                // need to plug the net entity syncs so they are correctly synchronized by MP
+                var vtNetEntity = GetComponent<VTNetEntity>();
+                if (vtNetEntity != null)
+                {
+                    if (playerModelSync != null && !vtNetEntity.netSyncs.Contains(playerModelSync))
+                        vtNetEntity.netSyncs.Add(playerModelSync);
+                    if (ejectSync != null && !vtNetEntity.netSyncs.Contains(ejectSync))
+                        vtNetEntity.netSyncs.Add(ejectSync);
+                }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: missing VTNetEntity in aircraft root");
+                }
 
                 /* ********** Local *********** */
 
-                var camRig = InstancedPilotGetLocal(slotIndex).transform.Find("EjectorSeat/CameraRigParent/[CameraRig]")
+                var cameraEyeObject = instancedPilotLocal.transform
+                    .Find("EjectorSeat/CameraRigParent/[CameraRig]/Camera (eye)");
+
+                OkuLog.Info($"{dbgm} Hook: VisualTargetFinder");
+                if (VisualTargetFinder != null)
+                {
+                    VisualTargetFinder.fovReference = cameraEyeObject;
+                }
+
+                OkuLog.Info($"{dbgm} Hook: HelmetController");
+                var helmetController = instancedPilotLocal.GetComponentInChildren<HelmetController>();
+                
+                if (helmetController == null)
+                {
+                    OkuLog.Info($"{lpf} No HelmetController found, skipping");
+                }
+                else if (helmetController != null && HmcsPowerInteractable != null)
+                {
+                    var tmpKey = HmcsPowerInteractable.name + $"{slotIndex}-OnSetState";
+                    if (!_actionMapInt.ContainsKey(tmpKey))
+                        _actionMapInt.Add(tmpKey, val => helmetController.SetPower(val));
+                    HmcsPowerInteractable.OnSetState.AddListener(_actionMapInt[tmpKey]);
+                }
+
+                OkuLog.Info($"{dbgm} Hook: TargetingMFDPage");
+                var targetingMfdPage = GetComponentInChildren<TargetingMFDPage>();
+                if (targetingMfdPage != null && helmetController != null)
+                {
+                    targetingMfdPage.SetHelmet(helmetController);
+                }
+
+                OkuLog.Info($"{dbgm} Hook: HUDElevationLadder");
+                var hudElevationLadder = GetComponentInChildren<HUDElevationLadder>();
+                if (hudElevationLadder != null)
+                {
+                    if (cameraEyeObject != null)
+                    {
+                        hudElevationLadder.headTransform = cameraEyeObject;
+                    }
+                }
+                else
+                {
+                    OkuLog.Info($"{lpf} No HUDElevationLadder found, skipping");
+                }
+
+                OkuLog.Info($"{dbgm} Hook: JoystickToggler");
+                if (JoystickToggler != null)
+                {
+                    var sideStickObjects = instancedPilotLocal.transform
+                        .Find("SideStickObjects");
+                    if (sideStickObjects != null && !JoystickToggler.aObjects.Contains(sideStickObjects.gameObject))
+                    {
+                        JoystickToggler.aObjects = JoystickToggler.aObjects.Append(sideStickObjects.gameObject).ToArray();
+                    }
+
+                    var centerStickObjects = instancedPilotLocal.transform
+                        .Find("CenterStickObjects");
+                    if (centerStickObjects != null && !JoystickToggler.aObjects.Contains(centerStickObjects.gameObject))
+                    {
+                        JoystickToggler.aObjects = JoystickToggler.aObjects.Append(centerStickObjects.gameObject).ToArray();
+                    }
+
+                    var acesSideEjectBase = instancedPilotLocal.transform
+                        .Find("EjectorSeat/acesSeatPos/acesSeatFrame/acesSideEjectBase");
+                    if (acesSideEjectBase != null && !JoystickToggler.aObjects.Contains(acesSideEjectBase.gameObject))
+                    {
+                        JoystickToggler.aObjects = JoystickToggler.aObjects.Append(acesSideEjectBase.gameObject).ToArray();
+                    }
+
+                    var acesCenterEjectBase = instancedPilotLocal.transform
+                        .Find("EjectorSeat/acesSeatPos/acesSeatFrame/acesCenterEjectBase");
+                    if (acesCenterEjectBase != null && !JoystickToggler.aObjects.Contains(acesCenterEjectBase.gameObject))
+                    {
+                        JoystickToggler.aObjects = JoystickToggler.aObjects.Append(acesCenterEjectBase.gameObject).ToArray();
+                    }
+                }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no JoystickToggler found, was this intentional?");
+                }
+
+                OkuLog.Info($"{dbgm} Hook: PlayerGTransform");
+                var gRef = instancedPilotLocal.transform
+                    .Find("EjectorSeat/CameraRigParent/PlayerGTransform");
+                if (gRef != null && FlightInfo != null)
+                {
+                    FlightInfo.playerGTransform = gRef;
+                }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no PlayerGTransform found on the pilot (tell Oku about this)");
+                }
+
+                var camRig = instancedPilotLocal.transform.Find("EjectorSeat/CameraRigParent/[CameraRig]")
                     ?.gameObject;
 
+                if (camRig == null)
+                {
+                    OkuLog.Error($"{lpf} Error: no camera rig found on the pilot! (tell Oku about this)");
+                }
+
+                OkuLog.Info($"{dbgm} Hook: RudderFootAnimator");
                 var rudderFootAnimator = instancedPilotLocal.GetComponentInChildren<RudderFootAnimator>();
                 if (rudderFootAnimator != null)
                 {
@@ -257,7 +444,12 @@ namespace Oku
                         VehicleInputManager.pyrOutputs = pyrOutputs.ToArray();
                     }
                 }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no RudderFootAnimator found on the pilot (tell Oku about this)");
+                }
 
+                OkuLog.Info($"{dbgm} Hook: EjectionSeat");
                 var ejectionSeat = instancedPilotLocal.GetComponentInChildren<EjectionSeat>();
                 if (ejectionSeat != null)
                 {
@@ -265,7 +457,7 @@ namespace Oku
                     if (endMission != null)
                         OnEject.AddListener(endMission.EnableThumbButtonToOpen);
 
-                    var tmpKey = ejectionSeat.name + "-OnEject";
+                    var tmpKey = ejectionSeat.name + $"{slotIndex}-OnEject";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnEject.Invoke());
                     ejectionSeat.OnEject.AddListener(_actionMapVoid[tmpKey]);
@@ -280,13 +472,18 @@ namespace Oku
                     }
                 }
 
+                OkuLog.Info($"{dbgm} Hook: HMDWeaponInfo");
                 var hmdWeaponInfo = instancedPilotLocal.GetComponentInChildren<HMDWeaponInfo>();
                 if (hmdWeaponInfo != null)
                 {
                     hmdWeaponInfo.wm = RootWm;
                 }
+                else
+                {
+                    OkuLog.Info($"{lpf} No HMDWeaponInfo found, skipping");
+                }
 
-                var helmetController = instancedPilotLocal.GetComponentInChildren<HelmetController>();
+                OkuLog.Info($"{dbgm} Hook: HelmetController <2>");
                 if (helmetController != null)
                 {
                     helmetController.battery = Battery;
@@ -296,6 +493,7 @@ namespace Oku
                         helmetController.alwaysOnHmcsObject = AlwaysOnHmcsDisplayObject;
                 }
 
+                OkuLog.Info($"{dbgm} Hook: BlackoutEffect");
                 var blackoutEffect = instancedPilotLocal.GetComponentInChildren<BlackoutEffect>();
                 if (blackoutEffect != null)
                 {
@@ -306,12 +504,22 @@ namespace Oku
                     if (endMission != null)
                         OnAccelDeath.AddListener(endMission.ShowEndMission);
 
-                    var tmpKey = blackoutEffect.name + "-OnAccelDeath";
+                    var tmpKey = blackoutEffect.name + $"{slotIndex}-OnAccelDeath";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnAccelDeath.Invoke());
                     blackoutEffect.OnAccelDeath.AddListener(_actionMapVoid[tmpKey]);
+
+                    if (PvSetup != null && !PvSetup.disableComponentOnConfig.Contains(blackoutEffect))
+                    {
+                        PvSetup.disableComponentOnConfig.Add(blackoutEffect);
+                    }
+                }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no BlackoutEffect found on the pilot (tell Oku about this)");
                 }
 
+                OkuLog.Info($"{dbgm} Hook: EmissiveTextureLight");
                 var autoJoyLight = instancedPilotLocal.GetComponentsInChildren<EmissiveTextureLight>()
                     .FirstOrDefault(etl => etl.name.Equals("autoJoyLight"));
                 if (autoJoyLight != null)
@@ -319,6 +527,7 @@ namespace Oku
                     autoJoyLight.battery = Battery;
                 }
 
+                OkuLog.Info($"{dbgm} Hook: VRJoystick");
                 var joyInteractables = instancedPilotLocal.GetComponentsInChildren<VRJoystick>();
                 foreach (var joyInteractable in joyInteractables)
                 {
@@ -331,118 +540,186 @@ namespace Oku
                             VehicleControlManifest.joysticks = vcmJoysticks.ToArray();
                         }
                     }
+                    else
+                    {
+                        OkuLog.Error($"{lpf} Error: no VehicleInputManager found! Please check your aircraft prefab for missing links.");
+                    }
 
                     // let's build these out -- these can be added/removed on enable/disable
                     // one-arg actions: Vector3
-                    var tmpKey = joyInteractable.name + "-OnSetStick";
+                    var tmpKey = joyInteractable.name + $"{slotIndex}-OnSetStick";
                     if (!_actionMapVec3.ContainsKey(tmpKey))
                         _actionMapVec3.Add(tmpKey, val => OnSetStick.Invoke(val));
                     joyInteractable.OnSetStick.AddListener(_actionMapVec3[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnSetThumbstick";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnSetThumbstick";
                     if (!_actionMapVec3.ContainsKey(tmpKey))
                         _actionMapVec3.Add(tmpKey, val => OnSetThumbstick.Invoke(val));
                     joyInteractable.OnSetThumbstick.AddListener(_actionMapVec3[tmpKey]);
 
                     // zero-argument actions
-                    tmpKey = joyInteractable.name + "-OnResetThumbstick";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnResetThumbstick";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnResetThumbstick.Invoke());
                     joyInteractable.OnResetThumbstick.AddListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnThumbstickButtonDown";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnThumbstickButtonDown";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnThumbstickButtonDown.Invoke());
                     joyInteractable.OnThumbstickButtonDown.AddListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnThumbstickButtonUp";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnThumbstickButtonUp";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnThumbstickButtonUp.Invoke());
                     joyInteractable.OnThumbstickButtonUp.AddListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnThumbstickButton";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnThumbstickButton";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnThumbstickButton.Invoke());
                     joyInteractable.OnThumbstickButton.AddListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnMenuButtonDown";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnMenuButtonDown";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnMenuButtonDown.Invoke());
                     joyInteractable.OnMenuButtonDown.AddListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnTriggerDown";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnTriggerDown";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnTriggerDown.Invoke());
                     joyInteractable.OnTriggerDown.AddListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnTriggerUp";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnTriggerUp";
                     if (!_actionMapVoid.ContainsKey(tmpKey))
                         _actionMapVoid.Add(tmpKey, () => OnTriggerUp.Invoke());
                     joyInteractable.OnTriggerUp.AddListener(_actionMapVoid[tmpKey]);
                 }
 
+                OkuLog.Info($"{dbgm} Hook: CockpitWindAudioController");
                 var cockpitWindAudioController =
                     instancedPilotLocal.GetComponentInChildren<CockpitWindAudioController>();
                 if (cockpitWindAudioController != null)
                 {
                     cockpitWindAudioController.flightInfo = FlightInfo;
                 }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no CockpitWindAudioController found on the pilot (tell Oku about this)");
+                }
 
+                OkuLog.Info($"{dbgm} Hook: SeatAdjuster");
                 var seatAdjuster = instancedPilotLocal.GetComponentInChildren<SeatAdjuster>();
                 if (seatAdjuster != null)
                 {
                     seatAdjuster.battery = Battery;
+                    var ejectionSeatAdjust = ejectionSeat.GetComponent<SeatAdjuster>();
+                    if (RaiseSeatInteractable != null && ejectionSeatAdjust != null)
+                    {
+                        // we keep one instance of the listener instead of racking up 20 doing this, because
+                        // RemoveListener removes all instances of the specified action
+                        RaiseSeatInteractable.OnInteract.RemoveListener(ejectionSeatAdjust.StartRaiseSeat);
+                        RaiseSeatInteractable.OnInteract.AddListener(ejectionSeatAdjust.StartRaiseSeat);
+                        RaiseSeatInteractable.OnStopInteract.RemoveListener(ejectionSeatAdjust.Stop);
+                        RaiseSeatInteractable.OnStopInteract.AddListener(ejectionSeatAdjust.Stop);
+                    }
+
+                    if (LowerSeatInteractable != null && ejectionSeatAdjust != null)
+                    {
+                        LowerSeatInteractable.OnInteract.RemoveListener(ejectionSeatAdjust.StartLowerSeat);
+                        LowerSeatInteractable.OnInteract.AddListener(ejectionSeatAdjust.StartLowerSeat);
+                        LowerSeatInteractable.OnStopInteract.RemoveListener(ejectionSeatAdjust.Stop);
+                        LowerSeatInteractable.OnStopInteract.AddListener(ejectionSeatAdjust.Stop);
+                    }
+                }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no SeatAdjuster found on the pilot (tell Oku about this)");
                 }
 
+                OkuLog.Info($"{dbgm} Hook: AtmosphericAudio");
                 var atmosphericAudio = InstancedPilot(slotIndex).GetComponentInChildren<AtmosphericAudio>();
                 if (atmosphericAudio != null)
                 {
                     atmosphericAudio.flightInfo = FlightInfo;
                 }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no AtmosphericAudio found on the pilot (tell Oku about this)");
+                }
 
                 /* ********** Remote *********** */
 
+                OkuLog.Info($"{dbgm} Hook: PlayerNameText");
                 var playerNameText = instancedPilotRemote.GetComponentInChildren<PlayerNameText>();
                 if (playerNameText != null)
                 {
                     playerNameText.netEntity = NetEntity;
                 }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no PlayerNameText found on the pilot (tell Oku about this)");
+                }
 
+                OkuLog.Info($"{dbgm} Hook: PerTeamTextColor");
                 var perTeamTextColor = instancedPilotRemote.GetComponentInChildren<PerTeamTextColor>();
                 if (perTeamTextColor != null)
                 {
                     perTeamTextColor.actor = Actor;
                     perTeamTextColor.netEnt = NetEntity;
                 }
+                else
+                {
+                    OkuLog.Warn($"{lpf} Warning: no PerTeamTextColor found on the pilot (tell Oku about this)");
+                }
+
+                //InstancedPilot(slotIndex).SetActive(true);
+                OkuLog.Info($"{dbgm} Pilot slot complete.");
             }
-            OkuLog.Info($"[OnEnable] Enable logic complete! Plane should be ready to go.");
+            //OkuLog.Info($"{lpf} Lastly enabling pilots...");
+            OkuLog.Info($"{lpf} Enable logic complete! Plane should be ready to go.");
         }
 
-        private void OnDisable()
+        public void Start()
         {
-            OkuLog.Info("[OnDisable] Disabled, doing disable cleanup work.");
+            foreach (var kvp in _instancedPilots)
+            {
+                kvp.Value.SetActive(true);
+            }
+        }
+
+        // currently unused, probably doesn't need to be?
+        public void DetachPilots()
+        {
+            const string lpf = "[DetachPilots]";
+            OkuLog.Info($"{lpf} Disabled, doing disable cleanup work.");
             // it should never, but just in case...
             if (_instancedPilots.Count == 0)
             {
-                OkuLog.Warn("[OnDisable] No instanced pilots found, nothing to do.");
+                OkuLog.Warn($"{lpf} No instanced pilots found, nothing to do.");
                 return;
             }
             if (_pilotSpawns.Count == 0)
             {
-                OkuLog.Warn("[OnDisable] No OkuPilotSpawns found, nothing to do.");
+                OkuLog.Warn($"{lpf} No OkuPilotSpawns found, nothing to do.");
                 return;
             }
 
             foreach (var pilot in _instancedPilots)
             {
                 var slotIndex = pilot.Key;
-                OkuLog.Info($"[OnDisable] Untethering pilot in slot {slotIndex}...");
+                OkuLog.Info($"{lpf} Untethering pilot in slot {slotIndex}...");
                 var instancedPilot = pilot.Value;
 
                 var instancedPilotLocal = InstancedPilotGetLocal(instancedPilot);
                 var instancedPilotRemote = InstancedPilotGetRemote(instancedPilot);
 
                 /* ********** Local *********** */
+                
+                if (HmcsPowerInteractable != null)
+                {
+                    var tmpKey = HmcsPowerInteractable.name + $"{slotIndex}-OnSetState";
+                    if (_actionMapInt.ContainsKey(tmpKey))
+                        HmcsPowerInteractable.OnSetState.RemoveListener(_actionMapInt[tmpKey]);
+                }
 
                 var ejectionSeat = instancedPilotLocal.GetComponentInChildren<EjectionSeat>();
                 if (ejectionSeat != null)
@@ -451,7 +728,7 @@ namespace Oku
                     if (endMission != null)
                         OnEject.RemoveListener(endMission.EnableThumbButtonToOpen);
 
-                    var tmpKey = ejectionSeat.name + "-OnEject";
+                    var tmpKey = ejectionSeat.name + $"{slotIndex}-OnEject";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         ejectionSeat.OnEject.RemoveListener(_actionMapVoid[tmpKey]);
                 }
@@ -460,40 +737,40 @@ namespace Oku
                 foreach (var joyInteractable in joyInteractables)
                 {
                     // one-arg actions: Vector3
-                    var tmpKey = joyInteractable.name + "-OnSetStick";
+                    var tmpKey = joyInteractable.name + $"{slotIndex}-OnSetStick";
                     if (_actionMapVec3.ContainsKey(tmpKey))
                         joyInteractable.OnSetStick.RemoveListener(_actionMapVec3[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnSetThumbstick";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnSetThumbstick";
                     if (_actionMapVec3.ContainsKey(tmpKey))
                         joyInteractable.OnSetThumbstick.RemoveListener(_actionMapVec3[tmpKey]);
 
                     // zero-argument actions
-                    tmpKey = joyInteractable.name + "-OnResetThumbstick";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnResetThumbstick";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         joyInteractable.OnResetThumbstick.RemoveListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnThumbstickButtonDown";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnThumbstickButtonDown";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         joyInteractable.OnThumbstickButtonDown.RemoveListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnThumbstickButtonUp";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnThumbstickButtonUp";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         joyInteractable.OnThumbstickButtonUp.RemoveListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnThumbstickButton";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnThumbstickButton";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         joyInteractable.OnThumbstickButton.RemoveListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnMenuButtonDown";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnMenuButtonDown";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         joyInteractable.OnMenuButtonDown.RemoveListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnTriggerDown";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnTriggerDown";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         joyInteractable.OnTriggerDown.RemoveListener(_actionMapVoid[tmpKey]);
 
-                    tmpKey = joyInteractable.name + "-OnTriggerUp";
+                    tmpKey = joyInteractable.name + $"{slotIndex}-OnTriggerUp";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         joyInteractable.OnTriggerUp.RemoveListener(_actionMapVoid[tmpKey]);
                 }
@@ -505,14 +782,16 @@ namespace Oku
                     if (endMission != null)
                         OnAccelDeath.RemoveListener(endMission.ShowEndMission);
 
-                    var tmpKey = blackoutEffect.name + "-OnAccelDeath";
+                    var tmpKey = blackoutEffect.name + $"{slotIndex}-OnAccelDeath";
                     if (_actionMapVoid.ContainsKey(tmpKey))
                         blackoutEffect.OnAccelDeath.RemoveListener(_actionMapVoid[tmpKey]);
                 }
 
                 /* ********** Remote *********** */
             }
-            OkuLog.Info("[OnDisable] Disable logic complete!");
+            OkuLog.Info($"{lpf} Disable logic complete!");
         }
+
+        /************* Helper functions **************/
     }
 }

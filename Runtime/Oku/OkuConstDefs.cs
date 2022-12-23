@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Oku.Utils;
 using UnityEngine;
 
 namespace Oku
@@ -33,12 +34,19 @@ namespace Oku
 
         public static GameObject GetPilotPrefab()
         {
-            if (_pilotPrefab == null)
+            var okuAb = GetCoreAssetBundle();
+            if (okuAb == null)
             {
-                _pilotPrefab = GetCoreAssetBundle().LoadAsset<GameObject>(PilotPrefabBundlePath);
+                OkuLog.Error("Could not get asset bundle. Did OkuLib correctly load it?");
+                return null;
             }
 
-            return _pilotPrefab;
+            //if (_pilotPrefab == null)
+            //{
+            //    _pilotPrefab = okuAb.LoadAsset<GameObject>(PilotPrefabBundlePath);
+            //}
+
+            return okuAb.LoadAsset<GameObject>(PilotPrefabBundlePath);
         }
     }
 }
